@@ -1,0 +1,23 @@
+# PR Review Workflows for beads-lite — formula-driven PR workflows.
+#
+# Provides formulas for reviewing, merging, iterating, diagnosing, and reverting
+# PRs. The consuming city supplies worker agents via gastown-beads-lite-pack.
+#
+# No agents defined — this pack provides formulas only.
+#
+# Usage in your city's pack.toml:
+#   [imports.pr-review]
+#   source = "packs/pr-review-workflows-beads-lite-pack"
+#
+#   [defaults.rig.imports.pr-review]
+#   source = "packs/pr-review-workflows-beads-lite-pack"
+#
+# Install formulas:
+#   gc pr-review install
+#
+# Sling a PR review:
+#   gc sling <rig>/gastown-beads-lite.polecat mol-adopt-pr --formula --var pr=<url-or-number>
+
+[pack]
+name = "pr-review"
+schema = 2
