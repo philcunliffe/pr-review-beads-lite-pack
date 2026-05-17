@@ -21,7 +21,7 @@ Do not use a global `bd`, normal `gc bd`, Dolt commands, or `bd --db`.
 
 ## Contract
 
-1. Caller slings with `--var pr=<url-or-number>` (and optionally `--var skip_gemini=true`)
+1. Caller slings with `--var pr=<url-or-number>`
 2. Polecat reads steps, executes each in order
 3. After review, human-gate blocks until maintainer closes it
 4. Polecat resumes finalize → merge → cleanup
@@ -31,7 +31,6 @@ Do not use a global `bd`, normal `gc bd`, Dolt commands, or `bd --db`.
 | Variable | Source | Description |
 |----------|--------|-------------|
 | pr | caller | PR URL or bare integer (required) |
-| skip_gemini | caller | "true" to skip Gemini reviewer (default: "false") |
 
 ## Failure Modes
 
@@ -41,7 +40,7 @@ Do not use a global `bd`, normal `gc bd`, Dolt commands, or `bd --db`.
 | Rebase has complex conflicts | Abort rebase, post comment, close root bead, stop |
 | Push fails | Report error, stop. User resolves manually |
 | CI fails | Report failure, stop, wait for human-gate or nudge |
-| Review-pr fails | Report which step failed, stop. Retry on next nudge |"""
+| Dual-review fails | Report which step failed, stop. Retry on next nudge |"""
 formula = "mol-adopt-pr"
 version = 1
 
@@ -49,10 +48,6 @@ version = 1
 [vars.pr]
 description = "PR URL (https://github.com/org/repo/pull/N) or bare integer"
 required = true
-
-[vars.skip_gemini]
-description = "Set to 'true' to skip Gemini reviewer (dual-model mode: Claude + Codex only)"
-default = "false"
 
 [[steps]]
 id = "intake"
@@ -112,8 +107,10 @@ maintainer_edits: <true|false>
 original_head: pending
 rebase_status: pending
 merge_path: undetermined
-skip_gemini: {{skip_gemini}}
-review_run_dir: pending"
+dual_review_bead: pending
+verdict: pending
+risk_class: pending
+report_path: pending"
 ```
 
 **8. Display summary:**
@@ -208,16 +205,19 @@ Update notes with:
 
 [[steps]]
 id = "review"
-title = "Run multi-model review"
+title = "Run dual-review (Codex + Claude)"
 needs = ["rebase-check"]
 description = """
-Fetch the canonical upstream base and invoke the multi-model review engine.
+Fetch the canonical upstream base and invoke the pr-pipeline pack's
+`mol-pr-dual-review` as a sub-formula. The sub-bead runs Codex + Claude
+reviews plus a blast-radius risk capstone and writes a mechanical verdict
+to its notes.
 
 **1. Read root bead notes:**
 ```bash
 ROOT_ID=$(bd mol current --json | jq -r '.molecule_id')
 ```
-Extract `pr_number`, `repo`, `base_branch`, `skip_gemini` from notes.
+Extract `pr_number`, `repo`, `base_branch` from notes.
 
 **2. Fetch canonical upstream base:**
 ```bash
@@ -225,45 +225,48 @@ UPSTREAM_URL="https://github.com/<owner>/<repo>.git"
 git fetch "$UPSTREAM_URL" <base_branch>:refs/adopt-pr/upstream-base
 ```
 
-**3. Invoke /review-pr:**
-```
-/review-pr <pr_number>
-```
-If `skip_gemini` is "true", append `--skip-gemini`:
-```
-/review-pr <pr_number> --skip-gemini
-```
-
-**CRITICAL:** When the review completes and asks whether to post the comment
-to GitHub, **DECLINE** (do not post). The finalize step posts its own
-synthesized comment.
-
-**4. Save the run_dir:**
-
-After the review completes, note the run_dir path from the output.
-Update root bead notes:
+**3. Invoke pr-pipeline dual-review (cross-pack call):**
 ```bash
-bd update $ROOT_ID --notes "<existing notes>
-review_run_dir: <run_dir_path>"
+SUB_OUT=$(gc <rig>/pr-pipeline pr dual-review {{pr}} 2>&1)
+SUB_BEAD=$(echo "$SUB_OUT" | grep -oE 'prblp-[a-z0-9]+' | tail -1)
+if [ -z "$SUB_BEAD" ]; then
+    echo "dual-review did not return a sub-bead ID — sub-formula likely crashed"
+    echo "$SUB_OUT"
+    bd update "$ROOT_ID" --notes "status: blocked
+failure: dual-review sub-formula did not produce a sub-bead"
+    exit 1
+fi
+bd update "$ROOT_ID" --notes "dual_review_bead: $SUB_BEAD"
 ```
 
-The synthesis artifact is at `<run_dir>/outputs/synthesis.md`.
+**4. Wait for sub-bead to complete and capture verdict:**
+
+The sub-bead writes `verdict:`, `risk_class:`, and `report_path:` to its
+notes on success. Block until status:complete (same pattern as
+`mol-feature-review`), then extract them onto the root bead:
+
+```bash
+VERDICT=$(bd show "$SUB_BEAD" --json | jq -r '.[0].notes // ""' | grep -m1 '^verdict:' | sed 's/^verdict: //')
+REPORT_PATH=$(bd show "$SUB_BEAD" --json | jq -r '.[0].notes // ""' | grep -m1 '^report_path:' | sed 's/^report_path: //')
+RISK_CLASS=$(bd show "$SUB_BEAD" --json | jq -r '.[0].notes // ""' | grep -m1 '^risk_class:' | sed 's/^risk_class: //')
+
+bd update "$ROOT_ID" --notes "verdict: $VERDICT
+risk_class: $RISK_CLASS
+report_path: $REPORT_PATH"
+```
 
 **5. Present findings summary:**
 
-Read the synthesis and present a brief summary to orient the human reviewer:
-- Decision (approve/request_changes)
-- Top findings by severity
-- Key files affected
-
 ```
-[adopt-pr] Review complete
-[adopt-pr]   Decision: <approve|request_changes>
-[adopt-pr]   Findings: <N> total (<blockers>, <majors>, <minors>)
-[adopt-pr]   Run dir: <path>
+[adopt-pr] Dual-review complete
+[adopt-pr]   Verdict: <approve|request_changes|block>
+[adopt-pr]   Risk class: <low|medium|high>
+[adopt-pr]   Report: <report_path>
+[adopt-pr]   Sub-bead: $SUB_BEAD
 ```
 
-**Exit criteria:** Review complete, findings presented, run_dir saved in notes."""
+**Exit criteria:** Dual-review sub-bead complete; verdict + risk_class +
+report_path captured on root bead."""
 
 [[steps]]
 id = "human-gate"
@@ -300,18 +303,18 @@ iteration (via `bd mol current`) or when nudged.
 
 [[steps]]
 id = "finalize"
-title = "Push, post synthesis, merge"
+title = "Push, post dual-review comment, merge"
 needs = ["human-gate"]
 description = """
-Determine the merge path, push, post synthesis comment, wait for CI, merge.
+Determine the merge path, push, post dual-review comment, wait for CI, merge.
 
 **1. Read root bead notes:**
 ```bash
 ROOT_ID=$(bd mol current --json | jq -r '.molecule_id')
 ```
 Extract all state: `pr_number`, `repo`, `base_branch`, `original_head`,
-`head_ref`, `maintainer_edits`, `rebase_status`, `review_run_dir`,
-`pr_title`, `pr_author`.
+`head_ref`, `maintainer_edits`, `rebase_status`, `dual_review_bead`,
+`verdict`, `risk_class`, `report_path`, `pr_title`, `pr_author`.
 
 **2. Check if PR was already merged:**
 ```bash
@@ -337,27 +340,14 @@ Update notes: `merge_path: A|B|C|D`
 
 ### Path A: Squash Merge (no maintainer changes)
 
-**A.1: Post synthesis comment.**
-Read `<review_run_dir>/outputs/synthesis.md`. Build comment using Path A template:
+**A.1: Post dual-review comment.**
 
-```markdown
-## Adoption Review
-
-Thanks for the contribution, @<author>! <specific acknowledgment>.
-
-### Review Summary
-<Decision + 2-3 sentence summary from synthesis>
-
-### Review Findings
-| # | Category | Severity | Confidence | Source | Summary |
-|---|----------|----------|------------|--------|---------|
-<findings from synthesis, or "No issues found.">
-
----
-_Adopted via `/adopt-pr` workflow. Contributor commits preserved._
+```bash
+gh pr comment {{pr}} --body "Dual-review complete.
+- **Verdict**: $VERDICT
+- **Risk class**: $RISK_CLASS
+- Reports: see bead $DUAL_REVIEW_BEAD ($REPORT_PATH)"
 ```
-
-Post: `gh pr comment <number> --body "<comment>"`
 
 **A.2: Wait for CI.**
 
@@ -442,8 +432,7 @@ else
 fi
 ```
 
-**B.3: Post synthesis comment** (Path B template — includes Initial Review,
-Maintainer Changes, Final Review Status sections).
+**B.3: Post dual-review comment** (same brief format as Path A.1).
 
 **B.4: Wait for CI** (same as Path A).
 
@@ -471,7 +460,7 @@ gh pr create --repo <owner>/<repo> --base <baseRefName> \
   --head <origin-owner>:fix/<head_ref>-complete \
   --title "<pr_title>" --body "<body referencing original PR>"
 ```
-**C.6:** Post synthesis on new PR (Path C template — credits contributor).
+**C.6:** Post dual-review comment on new PR (same brief format as Path A.1).
 **C.7:** Wait for CI on new PR.
 **C.8:** Merge new PR: `gh pr merge <new-number> --repo <owner>/<repo> --merge`
 **C.9:** Close original PR with warm thank-you comment.
@@ -485,7 +474,7 @@ gh pr create --repo <owner>/<repo> --base <baseRefName> \
 **D.2:** Cherry-pick maintainer fixup commits only.
 **D.3:** Push: `git push -u origin fix/<head_ref>-review-fixups`
 **D.4:** Create follow-up PR referencing original.
-**D.5:** Post synthesis on follow-up PR (Path D template).
+**D.5:** Post dual-review comment on follow-up PR (same brief format as Path A.1).
 **D.6:** Wait for CI.
 **D.7:** Squash merge follow-up: `gh pr merge <followup-number> --squash`
 **D.8:** Comment on original PR linking to follow-up.
@@ -500,7 +489,7 @@ gh pr create --repo <owner>/<repo> --base <baseRefName> \
 - **Squash guardrails mandatory** — all four checks must pass before pushing rewritten history
 - **All reviews use canonical upstream base** — fetched from the real upstream URL, not origin
 
-**Exit criteria:** PR merged (or new PR created and merged), synthesis posted."""
+**Exit criteria:** PR merged (or new PR created and merged), dual-review comment posted."""
 
 [[steps]]
 id = "complete"
