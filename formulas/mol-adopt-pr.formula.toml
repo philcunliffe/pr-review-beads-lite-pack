@@ -340,14 +340,10 @@ Update notes: `merge_path: A|B|C|D`
 
 ### Path A: Squash Merge (no maintainer changes)
 
-**A.1: Post dual-review comment.**
-
-```bash
-gh pr comment {{pr}} --body "Dual-review complete.
-- **Verdict**: $VERDICT
-- **Risk class**: $RISK_CLASS
-- Reports: see bead $DUAL_REVIEW_BEAD ($REPORT_PATH)"
-```
+**A.1: (no PR comment to post here.)** The dual-review sub-formula's
+`complete` step has already posted a structured summary comment on the
+PR — do not post a second dual-review comment from this step. Path A
+proceeds straight to the CI wait.
 
 **A.2: Wait for CI.**
 
@@ -432,7 +428,8 @@ else
 fi
 ```
 
-**B.3: Post dual-review comment** (same brief format as Path A.1).
+**B.3: (no PR comment to post here.)** The dual-review sub-formula's
+`complete` step has already posted the summary; do not double-post.
 
 **B.4: Wait for CI** (same as Path A).
 
@@ -460,7 +457,11 @@ gh pr create --repo <owner>/<repo> --base <baseRefName> \
   --head <origin-owner>:fix/<head_ref>-complete \
   --title "<pr_title>" --body "<body referencing original PR>"
 ```
-**C.6:** Post dual-review comment on new PR (same brief format as Path A.1).
+**C.6:** Copy the dual-review summary comment from the original PR to
+the new PR so reviewers of the new PR see the verdict. Fetch the
+sub-formula's `pr_comment` URL from `$DUAL_REVIEW_BEAD` notes and
+mirror its body verbatim onto the new PR with a one-line "originally
+posted on #{{pr}}" prefix. Do not re-run the dual-review.
 **C.7:** Wait for CI on new PR.
 **C.8:** Merge new PR: `gh pr merge <new-number> --repo <owner>/<repo> --merge`
 **C.9:** Close original PR with warm thank-you comment.
@@ -474,7 +475,9 @@ gh pr create --repo <owner>/<repo> --base <baseRefName> \
 **D.2:** Cherry-pick maintainer fixup commits only.
 **D.3:** Push: `git push -u origin fix/<head_ref>-review-fixups`
 **D.4:** Create follow-up PR referencing original.
-**D.5:** Post dual-review comment on follow-up PR (same brief format as Path A.1).
+**D.5:** Copy the dual-review summary comment from the original PR
+(via `$DUAL_REVIEW_BEAD` `pr_comment` URL) onto the follow-up PR with a
+"originally posted on #{{pr}}" prefix. Do not re-run the dual-review.
 **D.6:** Wait for CI.
 **D.7:** Squash merge follow-up: `gh pr merge <followup-number> --squash`
 **D.8:** Comment on original PR linking to follow-up.
@@ -489,7 +492,10 @@ gh pr create --repo <owner>/<repo> --base <baseRefName> \
 - **Squash guardrails mandatory** — all four checks must pass before pushing rewritten history
 - **All reviews use canonical upstream base** — fetched from the real upstream URL, not origin
 
-**Exit criteria:** PR merged (or new PR created and merged), dual-review comment posted."""
+**Exit criteria:** PR merged (or new PR created and merged). The
+dual-review summary comment was posted by the sub-formula's `complete`
+step on the original PR; Paths C and D mirror it onto the new /
+follow-up PR they create."""
 
 [[steps]]
 id = "complete"
