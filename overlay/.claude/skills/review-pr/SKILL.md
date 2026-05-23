@@ -288,9 +288,9 @@ Save the context block to `<run_dir>/context/pr-context.md`.
 ### Step 4: Write PTY wrapper scripts
 
 Write to `<run_dir>/scripts/` (see Agent Invocations below):
-- `aimux-claude.sh` — PTY wrapper for Claude invocations
-- `aimux-codex.sh` — PTY wrapper for Codex invocations
-- `aimux-gemini.sh` — PTY wrapper for Gemini invocations (skip if `--skip-gemini`)
+- `claude-review.sh` — PTY wrapper for Claude invocations
+- `codex-review.sh` — PTY wrapper for Codex invocations
+- `gemini-review.sh` — PTY wrapper for Gemini invocations (skip if `--skip-gemini`)
 
 ### Step 5: Pre-flight check (parallel)
 
@@ -299,16 +299,16 @@ Verify required agents are available. All preflight checks are independent — r
 echo "Reply ONLY with: ok" > <run_dir>/prompts/preflight_claude.md
 echo "Reply ONLY with: ok" > <run_dir>/prompts/preflight_codex.md
 
-bash <run_dir>/scripts/aimux-claude.sh <run_dir>/prompts/preflight_claude.md /tmp/claude_preflight.txt &
+bash <run_dir>/scripts/claude-review.sh <run_dir>/prompts/preflight_claude.md /tmp/claude_preflight.txt &
 CLAUDE_PF=$!
 
-bash <run_dir>/scripts/aimux-codex.sh <run_dir>/prompts/preflight_codex.md /tmp/codex_preflight.txt &
+bash <run_dir>/scripts/codex-review.sh <run_dir>/prompts/preflight_codex.md /tmp/codex_preflight.txt &
 CODEX_PF=$!
 
 # Skip Gemini preflight if --skip-gemini
 if [ "$SKIP_GEMINI" != "true" ]; then
   echo "Reply ONLY with: ok" > <run_dir>/prompts/preflight_gemini.md
-  bash <run_dir>/scripts/aimux-gemini.sh <run_dir>/prompts/preflight_gemini.md /tmp/gemini_preflight.txt &
+  bash <run_dir>/scripts/gemini-review.sh <run_dir>/prompts/preflight_gemini.md /tmp/gemini_preflight.txt &
   GEMINI_PF=$!
 fi
 
@@ -326,7 +326,7 @@ if [ "$SKIP_GEMINI" != "true" ]; then
   cat /tmp/gemini_preflight.txt
 fi
 ```
-If any required agent fails, stop: `"Required agent <name> is not available. Check aimux status."`
+If any required agent fails, stop: `"Required agent <name> is not available. Check that the underlying CLI (claude/codex/gemini) is on PATH and working."`
 
 ---
 
@@ -365,20 +365,20 @@ BASE_WORKTREE="<run_dir>/worktree"
 PR_WORKTREE="<run_dir>/worktree-pr"
 
 # Claude (via PTY wrapper) -- run in background from BASE worktree
-cd "$BASE_WORKTREE" && bash <run_dir>/scripts/aimux-claude.sh \
+cd "$BASE_WORKTREE" && bash <run_dir>/scripts/claude-review.sh \
   <run_dir>/prompts/claude-reviewer.md \
   <run_dir>/outputs/claude-review.md &
 CLAUDE_PID=$!
 
 # Codex (via PTY wrapper) -- run in background from PR HEAD worktree.
-cd "$PR_WORKTREE" && bash <run_dir>/scripts/aimux-codex.sh \
+cd "$PR_WORKTREE" && bash <run_dir>/scripts/codex-review.sh \
   <run_dir>/prompts/codex-reviewer.md \
   <run_dir>/outputs/codex-review.md &
 CODEX_PID=$!
 
 # Gemini (via PTY wrapper) -- skip if --skip-gemini
 if [ "$SKIP_GEMINI" != "true" ]; then
-  cd "$PR_WORKTREE" && bash <run_dir>/scripts/aimux-gemini.sh \
+  cd "$PR_WORKTREE" && bash <run_dir>/scripts/gemini-review.sh \
     <run_dir>/prompts/gemini-reviewer.md \
     <run_dir>/outputs/gemini-review.md &
   GEMINI_PID=$!
@@ -415,7 +415,7 @@ Read all three review outputs and produce the final report.
 3. **Save** to `<run_dir>/prompts/synthesizer.md`.
 4. **Invoke Claude** for synthesis (Claude is better at reasoning-heavy merge tasks):
    ```bash
-   bash <run_dir>/scripts/aimux-claude.sh \
+   bash <run_dir>/scripts/claude-review.sh \
      <run_dir>/prompts/synthesizer.md \
      <run_dir>/outputs/synthesis.md
    ```
@@ -544,7 +544,7 @@ Where `<MODEL_LIST>` is:
 
 **Critical environment fixes (learned 2026-02-13):**
 - **`unset CLAUDECODE`** — Claude Code refuses to launch inside another Claude Code session (detects via `CLAUDECODE` env var). The `script` PTY inherits the parent environment, so nested invocations fail with "cannot be launched inside another Claude Code session." Unsetting this var in the `script -c` command fixes it.
-- **`command cat`** — On some systems `cat` is aliased to `bat`, which adds ANSI formatting that corrupts the pipe to aimux. Using `command cat` bypasses aliases.
+- **`command cat`** — On some systems `cat` is aliased to `bat`, which adds ANSI formatting that corrupts the pipe to the reviewer CLI. Using `command cat` bypasses aliases.
 
 **Stream-JSON output format (learned 2026-02-13):**
 - Claude's `--output-format stream-json` produces TWO different event formats depending on whether Claude uses tools:
@@ -552,12 +552,12 @@ Where `<MODEL_LIST>` is:
   - **Multi-turn with tool use:** `assistant` events with `message.content[].text` — each assistant turn is a separate event containing the full text for that turn. The review content is in the longest text block that contains `##` markers.
 - The parser MUST handle both formats. Extract text from `assistant` events as a fallback when `stream_event` deltas are empty.
 
-Write this to `<run_dir>/scripts/aimux-claude.sh` during Phase 1:
+Write this to `<run_dir>/scripts/claude-review.sh` during Phase 1:
 
 ```bash
 #!/usr/bin/env bash
-# aimux-claude.sh — PTY-wrapped Claude invocation via aimux
-# Usage: aimux-claude.sh <prompt_file> <output_file> [timeout_seconds]
+# claude-review.sh — PTY-wrapped Claude invocation
+# Usage: claude-review.sh <prompt_file> <output_file> [timeout_seconds]
 set -euo pipefail
 
 PROMPT_FILE="$1"
@@ -573,7 +573,7 @@ LOG_FILE=$(mktemp /tmp/claude-pty-XXXXXX.log)
 trap 'rm -f "$LOG_FILE"' EXIT
 
 timeout "$TIMEOUT" script -q -e -f -c \
-  "unset CLAUDECODE; command cat '$PROMPT_FILE' | aimux run claude -p --verbose --model opus --output-format stream-json -- -" \
+  "unset CLAUDECODE; command cat '$PROMPT_FILE' | claude -p --verbose --model opus --output-format stream-json -- -" \
   "$LOG_FILE" > /dev/null 2>&1 || true
 
 python3 -c '
@@ -641,13 +641,13 @@ sys.stdout.write(out)
 ' "$LOG_FILE" > "$OUTPUT_FILE"
 
 if [[ ! -s "$OUTPUT_FILE" ]]; then
-  echo "ERROR: Claude produced empty output. Check aimux status." >&2
+  echo "ERROR: Claude produced empty output. Check that 'claude' is on PATH and the log tail below." >&2
   tail -50 "$LOG_FILE" >&2 || true
   exit 1
 fi
 ```
 
-Make executable: `chmod +x <run_dir>/scripts/aimux-claude.sh`
+Make executable: `chmod +x <run_dir>/scripts/claude-review.sh`
 
 ### Codex PTY Wrapper (REQUIRED)
 
@@ -661,12 +661,12 @@ Make executable: `chmod +x <run_dir>/scripts/aimux-claude.sh`
 - Use `-c model_reasoning_effort='"xhigh"'` for maximum reasoning depth.
 - Pipe the prompt via `cat <file> | ... -- -` (not stdin redirect `-- - < file`).
 
-Write this to `<run_dir>/scripts/aimux-codex.sh` during Phase 1:
+Write this to `<run_dir>/scripts/codex-review.sh` during Phase 1:
 
 ```bash
 #!/usr/bin/env bash
-# aimux-codex.sh — PTY-wrapped Codex invocation via aimux
-# Usage: aimux-codex.sh <prompt_file> <output_file> [timeout_seconds]
+# codex-review.sh — PTY-wrapped Codex invocation
+# Usage: codex-review.sh <prompt_file> <output_file> [timeout_seconds]
 set -euo pipefail
 
 PROMPT_FILE="$1"
@@ -683,7 +683,7 @@ trap 'rm -f "$LOG_FILE"' EXIT
 
 # Build the command in a temp file (avoids quoting issues with script -c)
 CMD_FILE=$(mktemp /tmp/codex-cmd-XXXXXX.sh)
-printf 'unset CLAUDECODE; command cat %q | aimux run codex -m gpt-5.3-codex exec --dangerously-bypass-approvals-and-sandbox -c model_reasoning_effort='"'"'"xhigh"'"'"' -- -\n' "$PROMPT_FILE" > "$CMD_FILE"
+printf 'unset CLAUDECODE; command cat %q | codex exec -m gpt-5.3-codex --dangerously-bypass-approvals-and-sandbox -c model_reasoning_effort='"'"'"xhigh"'"'"' -\n' "$PROMPT_FILE" > "$CMD_FILE"
 chmod +x "$CMD_FILE"
 
 timeout "$TIMEOUT" script -q -e -f -c "bash '$CMD_FILE'" "$LOG_FILE" > /dev/null 2>&1 || true
@@ -743,26 +743,26 @@ else:
 ' "$LOG_FILE" > "$OUTPUT_FILE"
 
 if [[ ! -s "$OUTPUT_FILE" ]]; then
-  echo "ERROR: Codex produced empty output. Check aimux status." >&2
+  echo "ERROR: Codex produced empty output. Check that 'codex' is on PATH and the log tail below." >&2
   tail -50 "$LOG_FILE" >&2 || true
   exit 1
 fi
 ```
 
-Make executable: `chmod +x <run_dir>/scripts/aimux-codex.sh`
+Make executable: `chmod +x <run_dir>/scripts/codex-review.sh`
 
 > **Historical note (2026-02-13):** The original approach used `codex exec -o <file>` to capture the last agent message. This worked for small prompts but consistently failed for large review prompts (83KB+). Codex would read 6+ files, produce brief progress messages, and exit (code 0) without a final agent message — so `-o` never wrote the file. The PTY capture approach (matching Forge's `agent-wrapper.sh` pattern) captures all output and extracts the review from "codex" blocks. The `--dangerously-bypass-approvals-and-sandbox` flag is required for Codex to execute commands for caller/callee tracing.
 
 ### Gemini PTY Wrapper (REQUIRED)
 
-**Gemini is invoked via `aimux run gemini`**, matching the pattern used for Claude and Codex. Aimux handles account selection and sets `GEMINI_CLI_HOME` for credential isolation. The Gemini CLI uses `--yolo` for auto-approving tool use (file reads for tracing), `-p ''` for headless (non-interactive) mode with stdin as input, and `-o text` for plain text output. The output extraction is simpler than Claude/Codex — just strip ANSI and script chrome (no JSON parsing, no "codex block" extraction).
+**Gemini is invoked directly via the `gemini` CLI**, matching the pattern used for Claude and Codex. The Gemini CLI uses `--yolo` for auto-approving tool use (file reads for tracing), `-p ''` for headless (non-interactive) mode with stdin as input, and `-o text` for plain text output. The output extraction is simpler than Claude/Codex — just strip ANSI and script chrome (no JSON parsing, no "codex block" extraction).
 
-Write this to `<run_dir>/scripts/aimux-gemini.sh` during Phase 1:
+Write this to `<run_dir>/scripts/gemini-review.sh` during Phase 1:
 
 ```bash
 #!/usr/bin/env bash
-# aimux-gemini.sh — PTY-wrapped Gemini invocation via aimux
-# Usage: aimux-gemini.sh <prompt_file> <output_file> [timeout_seconds]
+# gemini-review.sh — PTY-wrapped Gemini invocation
+# Usage: gemini-review.sh <prompt_file> <output_file> [timeout_seconds]
 set -euo pipefail
 
 PROMPT_FILE="$1"
@@ -778,7 +778,7 @@ LOG_FILE=$(mktemp /tmp/gemini-pty-XXXXXX.log)
 trap 'rm -f "$LOG_FILE"' EXIT
 
 timeout "$TIMEOUT" script -q -e -f -c \
-  "command cat '$PROMPT_FILE' | aimux run gemini -- -m gemini-3-pro-preview --yolo -o text -p ''" \
+  "command cat '$PROMPT_FILE' | gemini -m gemini-3-pro-preview --yolo -o text -p ''" \
   "$LOG_FILE" > /dev/null 2>&1 || true
 
 # Extract clean text from PTY log (strip ANSI + script chrome)
@@ -797,13 +797,13 @@ sys.stdout.write(text.strip() + "\n")
 ' "$LOG_FILE" > "$OUTPUT_FILE"
 
 if [[ ! -s "$OUTPUT_FILE" ]]; then
-  echo "ERROR: Gemini produced empty output. Check aimux status." >&2
+  echo "ERROR: Gemini produced empty output. Check that 'gemini' is on PATH and the log tail below." >&2
   tail -50 "$LOG_FILE" >&2 || true
   exit 1
 fi
 ```
 
-Make executable: `chmod +x <run_dir>/scripts/aimux-gemini.sh`
+Make executable: `chmod +x <run_dir>/scripts/gemini-review.sh`
 
 ---
 
@@ -1056,7 +1056,7 @@ End with:
 
 ### gemini-reviewer
 
-This prompt is passed to Gemini via PTY-wrapped `aimux run gemini` along with the full context block (metadata + diff). Gemini runs from the PR head worktree and can read files for cross-file pattern analysis.
+This prompt is passed to Gemini via PTY-wrapped direct `gemini` invocation along with the full context block (metadata + diff). Gemini runs from the PR head worktree and can read files for cross-file pattern analysis.
 
 ```
 You are "gemini-reviewer" for a code review in the gastown codebase.
@@ -1364,8 +1364,8 @@ Print phase transitions to terminal.
 | No commits between branches (local mode) | Report "No commits between '<base>' and '<branch>'. Nothing to review." |
 | `--base` used in PR mode | Ignore silently (base is determined by the PR) |
 | Worktree creation fails | Try fallback ref method (PR mode). If still fails, report error — review cannot proceed without accurate codebase access |
-| Agent pre-flight fails | Report which agent, suggest `aimux status` |
-| Gemini unavailable via aimux | If `--skip-gemini`: N/A. Otherwise: Report "Gemini not available. Check `aimux status` and `aimux verify gemini`.", stop |
+| Agent pre-flight fails | Report which agent, suggest running the CLI manually (`claude -p`, `codex exec`, or `gemini -p ''`) to diagnose |
+| Gemini unavailable | If `--skip-gemini`: N/A. Otherwise: Report "Gemini not available. Check that `gemini` is on PATH and the CLI is authenticated.", stop |
 | One reviewer produces empty output | Report failure and stop. All required reviewers must succeed — no single-model fallback |
 | Gemini produces empty output | If `--skip-gemini`: N/A. Otherwise: Report failure, stop |
 | Codex PTY log has no "codex" blocks | Codex may have failed to start or hit an error. Check the PTY log file. Stop pipeline — all reviewers required |
